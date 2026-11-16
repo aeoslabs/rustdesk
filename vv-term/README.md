@@ -14,29 +14,37 @@ it builds in a few minutes on a small Linux box.
 ## Usage
 
 ```sh
-vv-term --id <ID> --password <PW> \
-  [--server <host[:port]>] [--relay <host[:port]>] \
-  --key <hbbs public key> [--timeout <secs>] [--relay-only] [-v] -- <command>
+vv-term --id <ID> [--password <PW>] \
+  [--server <host[:port]|wss://url>] [--relay <host[:port]|wss://url>] \
+  --key <hbbs public key> [--timeout <secs>] [--accept-timeout <secs>] \
+  [--shell auto|posix|powershell|cmd] [--relay-only] [-v] -- <command>
 ```
 
-- `--server`: rendezvous server, default `rd-id.videovault.tech` (port 21116).
-  A `ws://` or `wss://` URL is also accepted.
-- `--relay`: use this relay instead of the one the rendezvous server names.
+- `--server`: rendezvous server. Default `wss://rd-id.videovault.tech/ws/id`, our
+  hbbs through the Cloudflare tunnel. A plain `host[:port]` uses raw TCP 21116.
+- `--relay`: use this relay instead of the one hbbs names. When `--server` is a
+  WebSocket URL, the relay hbbs names is reached the same way, at
+  `wss://<relay host>/ws/relay`.
 - `--key`: the hbbs public key (`id_ed25519.pub`). Also read from `VV_TERM_KEY`.
 - `--password`: the peer's password. Also read from `VV_TERM_PASSWORD`, which
-  keeps it out of the process list.
+  keeps it out of the process list. Leave it out when the editor accepts each
+  session by click.
+- `--accept-timeout`: how long to wait for the editor's click (default 120 s).
+- `--shell`: how to wrap the command. `auto` picks PowerShell for Windows peers
+  (falling back to cmd when `powershell.exe` is missing) and POSIX otherwise.
 - `--relay-only`: skip the direct connection attempt.
 - The peer must allow the terminal (`enable-terminal = 'Y'`).
 
-The command runs in a subshell of the peer's login shell, with stderr merged
-into stdout. Exit status: the command's own, 255 for a connection or login
-error, 124 on timeout.
+The command's stderr is merged into stdout. On POSIX peers it runs in a subshell
+of the login shell; on Windows in a child `powershell.exe` (or `cmd.exe /c`), so
+`exit` ends only the command. Exit status: the command's own, 125 when the editor
+does not accept in time, 124 on timeout, 255 for a connection or login error.
 
 ## Limits (spike)
 
-- POSIX shells only (Linux, macOS). Windows peers open cmd or PowerShell and
-  need a different command wrapper.
-- No 2FA or trusted-device login, and no click-to-accept flow yet.
+- The Windows wrappers are untested on a real Windows peer.
+- The cmd fallback breaks on commands containing double quotes.
+- No 2FA or trusted-device login.
 
 ## Build
 

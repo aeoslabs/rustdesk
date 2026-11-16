@@ -38,6 +38,8 @@ const CONNECT_TIMEOUT: u64 = 18_000;
 const READ_TIMEOUT: u64 = 18_000;
 // Version we announce to the peer; features are gated on it.
 const PEER_VERSION: &str = "1.5.3";
+// Through the Cloudflare tunnel; raw TCP 21116/21117 is not reachable that way.
+const DEFAULT_SERVER: &str = "wss://rd-id.videovault.tech/ws/id";
 
 struct Args {
     id: String,
@@ -49,12 +51,15 @@ struct Args {
     timeout: u64,
     verbose: bool,
     relay_only: bool,
+    accept_timeout: u64,
+    shell: String,
 }
 
 fn usage() -> ! {
     eprintln!(
-        "usage: vv-term --id <ID> --password <PW> [--server <host[:port]>] [--relay <host[:port]>]\n\
-         \x20              --key <hbbs public key> [--timeout <secs>] [--relay-only] [-v] -- <command>"
+        "usage: vv-term --id <ID> [--password <PW>] [--server <host[:port]|wss://url>] [--relay <host[:port]|wss://url>]\n\
+         \x20              --key <hbbs public key> [--timeout <secs>] [--accept-timeout <secs>]\n\
+         \x20              [--shell auto|posix|powershell|cmd] [--relay-only] [-v] -- <command>"
     );
     std::process::exit(2);
 }
@@ -63,13 +68,15 @@ fn parse_args() -> Args {
     let mut a = Args {
         id: String::new(),
         password: String::new(),
-        server: "rd-id.videovault.tech".to_owned(),
+        server: DEFAULT_SERVER.to_owned(),
         relay: None,
         key: std::env::var("VV_TERM_KEY").unwrap_or_default(),
         command: String::new(),
         timeout: 120,
         verbose: false,
         relay_only: false,
+        accept_timeout: 120,
+        shell: "auto".to_owned(),
     };
     if let Ok(p) = std::env::var("VV_TERM_PASSWORD") {
         a.password = p;
@@ -90,6 +97,18 @@ fn parse_args() -> Args {
             }
             "-v" | "--verbose" => a.verbose = true,
             "--relay-only" => a.relay_only = true,
+            "--accept-timeout" => {
+                a.accept_timeout = it
+                    .next()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(|| usage())
+            }
+            "--shell" => {
+                a.shell = it.next().unwrap_or_else(|| usage());
+                if !["auto", "posix", "powershell", "cmd"].contains(&a.shell.as_str()) {
+                    usage();
+                }
+            }
             "--" => {
                 a.command = it.collect::<Vec<_>>().join(" ");
                 break;
@@ -97,7 +116,8 @@ fn parse_args() -> Args {
             _ => usage(),
         }
     }
-    if a.id.is_empty() || a.password.is_empty() || a.key.is_empty() || a.command.is_empty() {
+    // An empty password is allowed: the editor then accepts the session by click.
+    if a.id.is_empty() || a.key.is_empty() || a.command.is_empty() {
         usage();
     }
     a
@@ -149,13 +169,35 @@ fn punch_failure(ph: &hbb_common::rendezvous_proto::PunchHoleResponse) -> hbb_co
     }
 }
 
+/// The relay to dial. When we reach hbbs over WebSocket, the relay hbbs names
+/// (a bare host such as `rd-relay.videovault.tech`) is reached the same way, at
+/// `/ws/relay` on that host, as RustDesk's own check_ws does.
+fn relay_endpoint(server: &str, relay: &str) -> String {
+    if relay.starts_with("ws://") || relay.starts_with("wss://") {
+        return relay.to_owned();
+    }
+    let scheme = if server.starts_with("wss://") {
+        "wss"
+    } else if server.starts_with("ws://") {
+        "ws"
+    } else {
+        return with_port(relay, RELAY_PORT);
+    };
+    let host = if relay.starts_with('[') {
+        relay.split(']').next().unwrap_or(relay).to_owned() + "]"
+    } else {
+        relay.split(':').next().unwrap_or(relay).to_owned()
+    };
+    format!("{}://{}/ws/relay", scheme, host)
+}
+
 /// Connect to the relay and pair with the peer's half by uuid.
 async fn create_relay(a: &Args, uuid: String, relay_server: &str) -> ResultType<Stream> {
     let relay = a.relay.clone().unwrap_or_else(|| relay_server.to_owned());
     if relay.is_empty() {
         bail!("rendezvous server gave no relay server and --relay is not set");
     }
-    let relay = with_port(&relay, RELAY_PORT);
+    let relay = relay_endpoint(&a.server, &relay);
     log::info!("relay {} uuid {}", relay, uuid);
     let mut conn = connect_tcp(relay.as_str(), CONNECT_TIMEOUT)
         .await
@@ -354,27 +396,95 @@ fn terminal_msg(action: terminal_action::Union) -> Message {
     m
 }
 
+const LOGIN_MSG_NO_PASSWORD_ACCESS: &str = "No Password Access";
+/// Exit status when the editor does not accept the session in time.
+const EXIT_NOT_ACCEPTED: i32 = 125;
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Shell {
+    Posix,
+    PowerShell,
+    Cmd,
+}
+
 struct Markers {
     start: String,
     end: String,
 }
 
-/// The line sent to the shell. The command runs in a subshell so `exit` ends only
-/// the command, not the terminal. Markers are split with quotes so the echoed input
-/// never contains them; only the shell's own output does.
-fn shell_line(cmd: &str, token: &str) -> (String, Markers) {
-    let line = format!(
-        "stty -echo 2>/dev/null; printf '\\n%s%s\\n' '__VVSTART' '_{t}__'; ( {cmd}\n) 2>&1; printf '\\n%s%s_%s__\\n' '__VVEND' '_{t}' \"$?\"\n",
-        t = token,
-        cmd = cmd
-    );
-    (
-        line,
-        Markers {
-            start: format!("__VVSTART_{}__", token),
-            end: format!("__VVEND_{}_", token),
-        },
-    )
+fn b64(data: &[u8]) -> String {
+    use hbb_common::base64::Engine;
+    hbb_common::base64::engine::general_purpose::STANDARD.encode(data)
+}
+
+fn utf16le(s: &str) -> Vec<u8> {
+    s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect()
+}
+
+/// The line sent to the shell, and the markers that frame the command's output.
+/// The markers never appear literally in the line, so the terminal's echo of the
+/// line is never mistaken for output.
+fn shell_line(shell: Shell, cmd: &str, token: &str) -> (String, Markers) {
+    let markers = Markers {
+        start: format!("__VVSTART_{}__", token),
+        end: format!("__VVEND_{}_", token),
+    };
+    let line = match shell {
+        // Subshell, so `exit` ends only the command, not the terminal.
+        Shell::Posix => format!(
+            "stty -echo 2>/dev/null; printf '\\n%s%s\\n' '__VVSTART' '_{t}__'; ( {cmd}\n) 2>&1; printf '\\n%s%s_%s__\\n' '__VVEND' '_{t}' \"$?\"\n",
+            t = token,
+            cmd = cmd
+        ),
+        // A powershell.exe invocation works the same from pwsh, Windows PowerShell or
+        // cmd. The command runs in a child powershell.exe, so `exit` ends only the
+        // command and $LASTEXITCODE carries its status.
+        Shell::PowerShell => {
+            let script = format!(
+                "$ProgressPreference='SilentlyContinue'\n\
+                 try {{ [Console]::OutputEncoding=[Text.Encoding]::UTF8 }} catch {{}}\n\
+                 Write-Output ('__VVSTART'+'_{t}__')\n\
+                 $s=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{c}'))\n\
+                 $e=[Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($s))\n\
+                 & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $e 2>&1 | ForEach-Object {{ \"$_\" }}\n\
+                 $c=$LASTEXITCODE; if ($null -eq $c) {{ $c=0 }}\n\
+                 Write-Output ('__VVEND'+'_{t}_'+$c+'__')\n",
+                t = token,
+                c = b64(cmd.as_bytes())
+            );
+            format!(
+                "powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand {}\r",
+                b64(&utf16le(&script))
+            )
+        }
+        // Fallback when there is no powershell.exe. Carets split the markers in the
+        // echoed line; cmd removes them when it runs the line. !errorlevel! is read
+        // after the command runs (delayed expansion).
+        Shell::Cmd => format!(
+            "cmd.exe /d /v:on /c \"echo __VV^START_{t}__& ({cmd}) 2>&1 & echo __VV^END_{t}_!errorlevel!__\"\r",
+            t = token,
+            cmd = cmd
+        ),
+    };
+    (line, markers)
+}
+
+/// Drop terminal control sequences (colours, cursor moves, titles) from output.
+fn strip_ansi(s: &str) -> String {
+    lazy_ansi()
+        .replace_all(s, "")
+        .replace("\r\n", "\n")
+        .replace('\r', "")
+}
+
+fn lazy_ansi() -> &'static hbb_common::regex::Regex {
+    static RE: std::sync::OnceLock<hbb_common::regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| {
+        hbb_common::regex::Regex::new(
+            r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)|\x1b[()][0-9A-Za-z]|\x1b[=>78DEHMc]",
+        )
+        .unwrap()
+    })
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -387,18 +497,39 @@ async fn main() {
     .target(hbb_common::env_logger::Target::Stderr)
     .init();
     let _ = hbb_common::sodiumoxide::init();
-    let code = match tokio::time::timeout(Duration::from_secs(a.timeout), run(&a)).await {
+    // --timeout covers connecting and the command; waiting for the editor's click
+    // has its own --accept-timeout on top.
+    let total = Duration::from_secs(a.timeout + a.accept_timeout);
+    let code = match tokio::time::timeout(total, run(&a)).await {
         Ok(Ok(code)) => code,
         Ok(Err(e)) => {
             eprintln!("vv-term: {:#}", e);
             255
         }
         Err(_) => {
-            eprintln!("vv-term: timed out after {}s", a.timeout);
+            eprintln!("vv-term: timed out after {}s", total.as_secs());
             124
         }
     };
     std::process::exit(code);
+}
+
+async fn send_command(
+    conn: &mut Stream,
+    terminal_id: i32,
+    shell: Shell,
+    a: &Args,
+    token: &str,
+) -> ResultType<Markers> {
+    log::info!("sending command ({:?})", shell);
+    let (line, markers) = shell_line(shell, &a.command, token);
+    conn.send(&terminal_msg(terminal_action::Union::Data(TerminalData {
+        terminal_id,
+        data: line.into_bytes().into(),
+        ..Default::default()
+    })))
+    .await?;
+    Ok(markers)
 }
 
 async fn run(a: &Args) -> ResultType<i32> {
@@ -406,16 +537,36 @@ async fn run(a: &Args) -> ResultType<i32> {
     secure_connection(a, &signed, &mut conn).await?;
 
     let token = format!("{:08x}", hbb_common::rand::random::<u32>());
-    let (line, markers) = shell_line(&a.command, &token);
+    let mut platform = String::new();
+    let mut shell = Shell::Posix;
+    let mut terminal_id = 0;
+    let mut markers: Option<Markers> = None;
+    let mut cmd_fallback_tried = false;
+    let mut waiting_since: Option<Instant> = None;
     let mut buf: Vec<u8> = Vec::new();
-    let mut printed_to = 0usize; // index into buf after the start marker
+    let mut printed_to = 0usize; // index into the cleaned text after the start marker
     let mut started = false;
 
     loop {
-        let bytes = match conn.next_timeout(60_000).await {
-            Some(Ok(b)) => b,
-            Some(Err(e)) => bail!("connection error: {}", e),
-            None => bail!("connection closed by peer"),
+        if let Some(t) = waiting_since {
+            if t.elapsed() > Duration::from_secs(a.accept_timeout) {
+                eprintln!(
+                    "vv-term: the editor did not accept the session within {}s",
+                    a.accept_timeout
+                );
+                return Ok(EXIT_NOT_ACCEPTED);
+            }
+        }
+        let bytes = match tokio::time::timeout(Duration::from_secs(1), conn.next()).await {
+            Err(_) => continue, // tick: re-check the accept deadline
+            Ok(Some(Ok(b))) => b,
+            Ok(Some(Err(e))) => bail!("connection error: {}", e),
+            Ok(None) => {
+                if waiting_since.is_some() {
+                    bail!("the editor declined the session");
+                }
+                bail!("connection closed by peer")
+            }
         };
         let msg = match Message::parse_from_bytes(&bytes) {
             Ok(m) => m,
@@ -424,11 +575,15 @@ async fn run(a: &Args) -> ResultType<i32> {
         match msg.union {
             Some(message::Union::Hash(hash)) => {
                 log::info!("login challenge received");
-                let p1 = sha256(a.password.as_bytes(), hash.salt.as_bytes());
-                let p2 = sha256(&p1, hash.challenge.as_bytes());
+                let password = if a.password.is_empty() {
+                    Vec::new()
+                } else {
+                    let p1 = sha256(a.password.as_bytes(), hash.salt.as_bytes());
+                    sha256(&p1, hash.challenge.as_bytes())
+                };
                 let mut lr = LoginRequest {
                     username: a.id.clone(),
-                    password: p2.into(),
+                    password: password.into(),
                     my_id: "vv-term".to_owned(),
                     my_name: "VideoVault Support".to_owned(),
                     my_platform: std::env::consts::OS.to_owned(),
@@ -443,9 +598,22 @@ async fn run(a: &Args) -> ResultType<i32> {
             }
             Some(message::Union::LoginResponse(lr)) => match lr.union {
                 Some(protos::message::login_response::Union::Error(e)) => {
+                    if e == LOGIN_MSG_NO_PASSWORD_ACCESS {
+                        if waiting_since.is_none() {
+                            eprintln!(
+                                "vv-term: waiting for the editor to accept (up to {}s)",
+                                a.accept_timeout
+                            );
+                            waiting_since = Some(Instant::now());
+                        }
+                        continue;
+                    }
                     bail!("login failed: {}", e)
                 }
                 Some(protos::message::login_response::Union::PeerInfo(pi)) => {
+                    if waiting_since.take().is_some() {
+                        eprintln!("vv-term: the editor accepted");
+                    }
                     log::info!(
                         "logged in: {}@{} ({} {})",
                         pi.username,
@@ -453,6 +621,14 @@ async fn run(a: &Args) -> ResultType<i32> {
                         pi.platform,
                         pi.version
                     );
+                    platform = pi.platform.clone();
+                    shell = match a.shell.as_str() {
+                        "posix" => Shell::Posix,
+                        "powershell" => Shell::PowerShell,
+                        "cmd" => Shell::Cmd,
+                        _ if platform == "Windows" => Shell::PowerShell,
+                        _ => Shell::Posix,
+                    };
                     conn.send(&terminal_msg(terminal_action::Union::Open(OpenTerminal {
                         terminal_id: 0,
                         rows: 50,
@@ -471,6 +647,9 @@ async fn run(a: &Args) -> ResultType<i32> {
             }
             Some(message::Union::Misc(m)) => {
                 if let Some(misc::Union::CloseReason(r)) = m.union {
+                    if waiting_since.is_some() {
+                        bail!("the editor declined the session: {}", r);
+                    }
                     bail!("peer closed the session: {}", r);
                 }
             }
@@ -479,13 +658,10 @@ async fn run(a: &Args) -> ResultType<i32> {
                     if !o.success {
                         bail!("could not open terminal: {}", o.message);
                     }
-                    log::info!("terminal opened, pid {}", o.pid);
-                    conn.send(&terminal_msg(terminal_action::Union::Data(TerminalData {
-                        terminal_id: o.terminal_id,
-                        data: line.clone().into_bytes().into(),
-                        ..Default::default()
-                    })))
-                    .await?;
+                    log::info!("terminal opened on {}, pid {}", platform, o.pid);
+                    terminal_id = o.terminal_id;
+                    markers =
+                        Some(send_command(&mut conn, terminal_id, shell, a, &token).await?);
                 }
                 Some(terminal_response::Union::Data(d)) => {
                     let data = if d.compressed {
@@ -494,23 +670,43 @@ async fn run(a: &Args) -> ResultType<i32> {
                         d.data.to_vec()
                     };
                     buf.extend_from_slice(&data);
-                    let text = String::from_utf8_lossy(&buf).into_owned();
+                    let Some(mk) = markers.as_ref() else {
+                        continue;
+                    };
+                    let text = strip_ansi(&String::from_utf8_lossy(&buf));
                     if !started {
-                        if let Some(p) = text.find(&markers.start) {
+                        // No powershell.exe on this Windows peer: fall back to cmd once.
+                        if shell == Shell::PowerShell
+                            && !cmd_fallback_tried
+                            && a.shell == "auto"
+                            && (text.contains("'powershell.exe' is not recognized")
+                                || text.contains("powershell.exe: command not found"))
+                        {
+                            cmd_fallback_tried = true;
+                            shell = Shell::Cmd;
+                            buf.clear();
+                            markers = Some(
+                                send_command(&mut conn, terminal_id, shell, a, &token).await?,
+                            );
+                            continue;
+                        }
+                        if let Some(p) = text.find(&mk.start) {
                             started = true;
-                            // skip marker and its line ending
-                            let mut i = p + markers.start.len();
+                            let mut i = p + mk.start.len();
                             let rest = &text[i..];
-                            i += rest.len() - rest.trim_start_matches(['\r', '\n']).len();
+                            i += rest.len() - rest.trim_start_matches(['\r', '\n', ' ']).len();
                             printed_to = i;
                         }
                     }
                     if started {
-                        if let Some(p) = text[printed_to..].find(&markers.end) {
+                        if printed_to > text.len() {
+                            printed_to = text.len();
+                        }
+                        if let Some(p) = text[printed_to..].find(&mk.end) {
                             let out = &text[printed_to..printed_to + p];
-                            print!("{}", out.replace("\r\n", "\n").trim_end_matches('\n'));
+                            print!("{}", out.trim_end_matches(['\n', ' ']));
                             println!();
-                            let tail = &text[printed_to + p + markers.end.len()..];
+                            let tail = &text[printed_to + p + mk.end.len()..];
                             let status: i32 = tail
                                 .split("__")
                                 .next()
@@ -527,13 +723,13 @@ async fn run(a: &Args) -> ResultType<i32> {
                             return Ok(status);
                         }
                         // stream what we have, holding back a possible partial end marker
-                        let safe = text.len().saturating_sub(markers.end.len() + 8);
+                        let safe = text.len().saturating_sub(mk.end.len() + 8);
                         if safe > printed_to {
                             let mut cut = safe;
                             while !text.is_char_boundary(cut) {
                                 cut -= 1;
                             }
-                            print!("{}", text[printed_to..cut].replace("\r\n", "\n"));
+                            print!("{}", &text[printed_to..cut]);
                             printed_to = cut;
                         }
                     }
