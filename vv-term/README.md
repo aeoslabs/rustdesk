@@ -29,7 +29,8 @@ vv-term --id <ID> [--password <PW>] \
 - `--password`: the peer's password. Also read from `VV_TERM_PASSWORD`, which
   keeps it out of the process list. Leave it out when the editor accepts each
   session by click.
-- `--accept-timeout`: how long to wait for the editor's click (default 120 s).
+- `--accept-timeout`: how long to wait for the editor's click (default 170 s; the
+  peer itself closes a session nobody accepted after 180 s).
 - `--shell`: how to wrap the command. `auto` picks PowerShell for Windows peers
   (falling back to cmd when `powershell.exe` is missing) and POSIX otherwise.
 - `--relay-only`: skip the direct connection attempt.
@@ -38,7 +39,7 @@ vv-term --id <ID> [--password <PW>] \
 The command's stderr is merged into stdout. On POSIX peers it runs in a subshell
 of the login shell; on Windows in a child `powershell.exe` (or `cmd.exe /c`), so
 `exit` ends only the command. Exit status: the command's own, 125 when the editor
-does not accept in time, 124 on timeout, 255 for a connection or login error.
+does not accept in time (or the session closes while waiting), 124 on timeout, 255 for a connection or login error.
 
 ## Limits (spike)
 

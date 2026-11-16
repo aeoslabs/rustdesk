@@ -75,7 +75,8 @@ fn parse_args() -> Args {
         timeout: 120,
         verbose: false,
         relay_only: false,
-        accept_timeout: 120,
+        // The peer closes a session nobody accepted after 180 s (LOGIN_GRACE).
+        accept_timeout: 170,
         shell: "auto".to_owned(),
     };
     if let Ok(p) = std::env::var("VV_TERM_PASSWORD") {
@@ -560,10 +561,17 @@ async fn run(a: &Args) -> ResultType<i32> {
         let bytes = match tokio::time::timeout(Duration::from_secs(1), conn.next()).await {
             Err(_) => continue, // tick: re-check the accept deadline
             Ok(Some(Ok(b))) => b,
-            Ok(Some(Err(e))) => bail!("connection error: {}", e),
+            Ok(Some(Err(e))) => {
+                if waiting_since.is_some() {
+                    eprintln!("vv-term: the session was closed before the editor accepted ({})", e);
+                    return Ok(EXIT_NOT_ACCEPTED);
+                }
+                bail!("connection error: {}", e)
+            }
             Ok(None) => {
                 if waiting_since.is_some() {
-                    bail!("the editor declined the session");
+                    eprintln!("vv-term: the editor declined the session, or it was closed before they accepted");
+                    return Ok(EXIT_NOT_ACCEPTED);
                 }
                 bail!("connection closed by peer")
             }
