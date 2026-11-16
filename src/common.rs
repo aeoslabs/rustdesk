@@ -2506,7 +2506,11 @@ pub fn rustdesk_interval(i: Interval) -> ThrottledInterval {
     ThrottledInterval::new(i)
 }
 
+#[allow(unreachable_code)]
 pub fn load_custom_client() {
+    // VideoVault Support: built-in settings only, never a custom.txt.
+    crate::vv_builtin::apply();
+    return;
     #[cfg(debug_assertions)]
     if let Ok(data) = std::fs::read_to_string("./custom.txt") {
         read_custom_client(data.trim());
