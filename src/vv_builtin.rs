@@ -15,8 +15,9 @@ use hbb_common::config;
 /// Set at build time (`VV_STAFF_VIEWER=1`) for the staff viewer: the same program with
 /// outgoing-only settings. Nothing secret is baked in; the staff token is read at launch.
 const STAFF_VIEWER: bool = match option_env!("VV_STAFF_VIEWER") {
-    Some("1") => true,
-    _ => false,
+    // Matching on a str is not allowed in a const, so compare the bytes.
+    Some(v) => v.len() == 1 && v.as_bytes()[0] == b'1',
+    None => false,
 };
 
 pub const APP_NAME: &str = if STAFF_VIEWER {
