@@ -10,8 +10,34 @@ on:
         description: "Build the staff viewer (outgoing only) instead of the support program"
         type: boolean
         default: false
-      publish_tag:
-        description: "Publish the artifacts to this pre-release tag (created if missing); empty = artifacts only"
+      windows:
+        description: "Build Windows x64"
+        type: boolean
+        default: true
+      mac:
+        description: "Build macOS (x86_64 and arm64)"
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      staff:
+        description: "Build the staff viewer (outgoing only) instead of the support program"
+        type: boolean
+        default: false
+      windows:
+        description: "Build Windows x64"
+        type: boolean
+        default: true
+      mac:
+        description: "Build macOS (x86_64 and arm64)"
+        type: boolean
+        default: true
+      source_repo:
+        description: "Repository to build (set when called from another repository)"
+        type: string
+        default: "aeoslabs/rustdesk"
+      source_ref:
+        description: "Commit to build (set when called from another repository)"
         type: string
         default: ""
 
@@ -69,6 +95,9 @@ env:
 jobs:
   generate-bridge:
     uses: ./.github/workflows/bridge.yml
+    with:
+      source_repo: ${{ inputs.source_repo || github.repository }}
+      source_ref: ${{ inputs.source_ref || github.sha }}
 
   build-RustDeskTempTopMostWindow:
     uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
@@ -88,6 +117,7 @@ jobs:
       target_version: Windows10
 
   build-for-windows-flutter:
+    if: ${{ inputs.windows }}
     name: ${{ matrix.job.target }}
     needs: [build-RustDeskTempTopMostWindow, generate-bridge]
     runs-on: ${{ matrix.job.os }}
@@ -116,6 +146,8 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          repository: ${{ inputs.source_repo || github.repository }}
+          ref: ${{ inputs.source_ref || github.sha }}
           submodules: recursive
 
       - name: Restore bridge files
@@ -493,6 +525,7 @@ jobs:
           if-no-files-found: error
 
   build-for-macOS:
+    if: ${{ inputs.mac }}
     name: ${{ matrix.job.target }}
     runs-on: ${{ matrix.job.os }}
     needs: [generate-bridge]
@@ -528,6 +561,8 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          repository: ${{ inputs.source_repo || github.repository }}
+          ref: ${{ inputs.source_ref || github.sha }}
           submodules: recursive
 
       - name: Import the codesign cert
@@ -771,41 +806,3 @@ jobs:
           name: macos-${{ matrix.job.arch }}-dmg
           path: ./rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg
           if-no-files-found: error
-
-  # Puts the unsigned results on a pre-release with Connect's asset names.
-  publish:
-    if: ${{ !cancelled() && inputs.publish_tag != '' }}
-    needs: [build-for-windows-flutter, build-for-macOS]
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: write
-    env:
-      GH_TOKEN: ${{ github.token }}
-      KIND: ${{ inputs.staff && 'staff-viewer' || 'support' }}
-      SUFFIX: ${{ inputs.staff && '-staff' || '' }}
-    steps:
-      - name: Download results
-        uses: actions/download-artifact@v4
-        with:
-          pattern: rustdesk-unsigned-*
-          path: results
-      - name: Collect and publish
-        run: |
-          set -euo pipefail
-          mkdir out
-          for dir in results/rustdesk-unsigned-windows-*; do
-            [ -d "$dir" ] || continue
-            arch="$(basename "$dir")"; arch="${arch#rustdesk-unsigned-windows-}"; arch="${arch%$SUFFIX}"
-            (cd "$dir" && zip -qr "../../out/videovault-$KIND-$VERSION-${{ inputs.publish_tag }}-windows-$arch.zip" .)
-          done
-          for dir in results/rustdesk-unsigned-macos-*; do
-            [ -d "$dir" ] || continue
-            arch="$(basename "$dir")"; arch="${arch#rustdesk-unsigned-macos-}"; arch="${arch%$SUFFIX}"
-            cp "$dir"/*.dmg "out/videovault-$KIND-$VERSION-${{ inputs.publish_tag }}-macos-$arch.dmg"
-          done
-          ls -l out
-          gh release view "${{ inputs.publish_tag }}" >/dev/null 2>&1 || \
-            gh release create "${{ inputs.publish_tag }}" --prerelease --title "VideoVault $KIND ${{ inputs.publish_tag }} (unsigned)" \
-              --notes "Unsigned build for VideoVault Connect. Source: this repository, branch ${{ github.ref_name }}."
-          gh release upload "${{ inputs.publish_tag }}" out/* --clobber
-          (cd out && sha256sum *)
