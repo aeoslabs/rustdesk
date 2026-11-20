@@ -5,6 +5,41 @@ name: VideoVault Support build
 
 on:
   workflow_dispatch:
+    inputs:
+      staff:
+        description: "Build the staff viewer (outgoing only) instead of the support program"
+        type: boolean
+        default: false
+      windows:
+        description: "Build Windows x64"
+        type: boolean
+        default: true
+      mac:
+        description: "Build macOS (x86_64 and arm64)"
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      staff:
+        description: "Build the staff viewer (outgoing only) instead of the support program"
+        type: boolean
+        default: false
+      windows:
+        description: "Build Windows x64"
+        type: boolean
+        default: true
+      mac:
+        description: "Build macOS (x86_64 and arm64)"
+        type: boolean
+        default: true
+      source_repo:
+        description: "Repository to build (set when called from another repository)"
+        type: string
+        default: "aeoslabs/rustdesk"
+      source_ref:
+        description: "Commit to build (set when called from another repository)"
+        type: string
+        default: ""
 
 # NOTE: F-Droid builder script 'flutter/build_fdroid.sh' reads environment
 # variables from this workflow!
@@ -51,6 +86,8 @@ env:
   #signing keys env variable checks
   ANDROID_SIGNING_KEY: "${{ secrets.ANDROID_SIGNING_KEY }}"
   MACOS_P12_BASE64: "${{ secrets.MACOS_P12_BASE64 }}"
+  # Read by src/vv_builtin.rs at build time: "1" builds the staff viewer.
+  VV_STAFF_VIEWER: ${{ inputs.staff && '1' || '0' }}
   UPLOAD_ARTIFACT: "true"
   PUBLISH_UPDATE_METADATA: "false"
   SIGN_BASE_URL: "${{ secrets.SIGN_BASE_URL }}-2"
@@ -58,6 +95,9 @@ env:
 jobs:
   generate-bridge:
     uses: ./.github/workflows/bridge.yml
+    with:
+      source_repo: ${{ inputs.source_repo || github.repository }}
+      source_ref: ${{ inputs.source_ref || github.sha }}
 
   build-RustDeskTempTopMostWindow:
     uses: ./.github/workflows/third-party-RustDeskTempTopMostWindow.yml
@@ -77,6 +117,7 @@ jobs:
       target_version: Windows10
 
   build-for-windows-flutter:
+    if: ${{ inputs.windows }}
     name: ${{ matrix.job.target }}
     needs: [build-RustDeskTempTopMostWindow, generate-bridge]
     runs-on: ${{ matrix.job.os }}
@@ -105,6 +146,8 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          repository: ${{ inputs.source_repo || github.repository }}
+          ref: ${{ inputs.source_ref || github.sha }}
           submodules: recursive
 
       - name: Restore bridge files
@@ -322,7 +365,7 @@ jobs:
         if: env.UPLOAD_ARTIFACT == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rustdesk-unsigned-windows-${{ matrix.job.arch }}
+          name: rustdesk-unsigned-windows-${{ matrix.job.arch }}${{ inputs.staff && '-staff' || '' }}
           path: rustdesk
 
       - name: Sign rustdesk files
@@ -482,6 +525,7 @@ jobs:
           if-no-files-found: error
 
   build-for-macOS:
+    if: ${{ inputs.mac }}
     name: ${{ matrix.job.target }}
     runs-on: ${{ matrix.job.os }}
     needs: [generate-bridge]
@@ -517,6 +561,8 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          repository: ${{ inputs.source_repo || github.repository }}
+          ref: ${{ inputs.source_ref || github.sha }}
           submodules: recursive
 
       - name: Import the codesign cert
@@ -709,7 +755,7 @@ jobs:
         if: env.UPLOAD_ARTIFACT == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: rustdesk-unsigned-macos-${{ matrix.job.arch }}
+          name: rustdesk-unsigned-macos-${{ matrix.job.arch }}${{ inputs.staff && '-staff' || '' }}
           path: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg # can not upload the directory directly or tar.gz, which destroy the link structure, causing the codesign failed
 
       - name: Codesign app and create signed dmg
