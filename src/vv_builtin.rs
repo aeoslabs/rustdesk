@@ -49,6 +49,10 @@ const OVERRIDE: &[(&str, &str)] = &[
     ("hide-security-settings", "Y"),
     ("hide-help-cards", "Y"),
     ("disable-change-id", "Y"),
+    // No direct IP access: every connection goes through our rendezvous server,
+    // which checks the staff token. RustDesk already defaults this off (option2bool
+    // treats an empty value as N); forcing it here also overrides a local config file.
+    ("direct-server", "N"),
 ];
 
 /// Support sessions: terminal allowed, every session accepted by the editor.
