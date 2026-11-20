@@ -47,6 +47,8 @@ struct Args {
     server: String,
     relay: Option<String>,
     key: String,
+    // Staff token for our hbbs (hq#595), sent in PunchHoleRequest and RequestRelay.
+    token: String,
     command: String,
     timeout: u64,
     verbose: bool,
@@ -58,7 +60,7 @@ struct Args {
 fn usage() -> ! {
     eprintln!(
         "usage: vv-term --id <ID> [--password <PW>] [--server <host[:port]|wss://url>] [--relay <host[:port]|wss://url>]\n\
-         \x20              --key <hbbs public key> [--timeout <secs>] [--accept-timeout <secs>]\n\
+         \x20              --key <hbbs public key> [--token <staff token>] [--timeout <secs>] [--accept-timeout <secs>]\n\
          \x20              [--shell auto|posix|powershell|cmd] [--relay-only] [-v] -- <command>"
     );
     std::process::exit(2);
@@ -71,6 +73,7 @@ fn parse_args() -> Args {
         server: DEFAULT_SERVER.to_owned(),
         relay: None,
         key: std::env::var("VV_TERM_KEY").unwrap_or_default(),
+        token: std::env::var("VV_TERM_TOKEN").unwrap_or_default(),
         command: String::new(),
         timeout: 120,
         verbose: false,
@@ -90,6 +93,7 @@ fn parse_args() -> Args {
             "--server" => a.server = it.next().unwrap_or_else(|| usage()),
             "--relay" => a.relay = Some(it.next().unwrap_or_else(|| usage())),
             "--key" => a.key = it.next().unwrap_or_else(|| usage()),
+            "--token" => a.token = it.next().unwrap_or_else(|| usage()),
             "--timeout" => {
                 a.timeout = it
                     .next()
@@ -228,6 +232,7 @@ async fn request_relay(a: &Args, relay_server: &str) -> ResultType<Stream> {
             uuid: uuid.clone(),
             relay_server: relay_server.to_owned(),
             secure: true,
+            token: a.token.clone(),
             ..Default::default()
         });
         socket.send(&m).await?;
@@ -258,6 +263,7 @@ async fn rendezvous(a: &Args) -> ResultType<(Stream, Vec<u8>)> {
         conn_type: ConnType::TERMINAL.into(),
         version: PEER_VERSION.to_owned(),
         force_relay: true,
+        token: a.token.clone(),
         ..Default::default()
     });
     for i in 1..=3u64 {

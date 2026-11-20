@@ -16,7 +16,7 @@ it builds in a few minutes on a small Linux box.
 ```sh
 vv-term --id <ID> [--password <PW>] \
   [--server <host[:port]|wss://url>] [--relay <host[:port]|wss://url>] \
-  --key <hbbs public key> [--timeout <secs>] [--accept-timeout <secs>] \
+  --key <hbbs public key> [--token <staff token>] [--timeout <secs>] [--accept-timeout <secs>] \
   [--shell auto|posix|powershell|cmd] [--relay-only] [-v] -- <command>
 ```
 
@@ -26,6 +26,10 @@ vv-term --id <ID> [--password <PW>] \
   WebSocket URL, the relay hbbs names is reached the same way, at
   `wss://<relay host>/ws/relay`.
 - `--key`: the hbbs public key (`id_ed25519.pub`). Also read from `VV_TERM_KEY`.
+- `--token`: staff token for our hbbs (`vvst1.<exp>.<who>.<hmac>`, hq#595). Also read
+  from `VV_TERM_TOKEN`, which keeps it out of the process list. It goes in the `token`
+  field of PunchHoleRequest and RequestRelay; hbbs in `VV_STAFF_MODE=enforce` treats a
+  request without a valid one as a request for an offline peer.
 - `--password`: the peer's password. Also read from `VV_TERM_PASSWORD`, which
   keeps it out of the process list. Leave it out when the editor accepts each
   session by click.
