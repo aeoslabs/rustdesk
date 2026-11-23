@@ -1910,7 +1910,8 @@ impl Connection {
         // One-time means gone once it has let a peer in, not once that peer
         // leaves. This session's later logins come in on the password the
         // session remembers, so they are not affected.
-        password::update_temporary_password();
+        // VideoVault support: a session secret from Connect is kept for the whole session.
+        crate::vv_builtin::update_temporary_password();
         // Releases the budget `check_id_whitelist` charges against this address: only a peer
         // that got this far proved more than a self-reported id.
         self.clear_id_whitelist_failures();
@@ -2586,6 +2587,11 @@ impl Connection {
         if !password::temporary_enabled() {
             return;
         }
+        // VideoVault support: the session secret is never rotated (that would lock staff
+        // out); the per-address limits in `check_failure` still apply.
+        if crate::vv_builtin::session_password_active() {
+            return;
+        }
 
         let mut state = TEMPORARY_PASSWORD_FAILURES.lock().unwrap();
         let current_password = password::temporary_password();
@@ -2607,7 +2613,7 @@ impl Connection {
             return;
         }
 
-        password::update_temporary_password();
+        crate::vv_builtin::update_temporary_password();
         let new_password = password::temporary_password();
         log::warn!(
             "Temporary password rotated after too many consecutive wrong attempts: failures={}, ip={}",
