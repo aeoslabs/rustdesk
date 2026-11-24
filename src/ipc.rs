@@ -998,7 +998,11 @@ async fn handle(data: Data, stream: &mut Connection) {
                         None
                     };
                 } else if name == "hide_cm" {
-                    value = if crate::hbbs_http::sync::is_pro() || crate::common::is_custom_client()
+                    // VideoVault support: with a session secret the connection manager starts
+                    // hidden, so closing its window cannot end the session (Stop in Connect does).
+                    value = if crate::vv_builtin::session_password_active() {
+                        Some("true".to_owned())
+                    } else if crate::hbbs_http::sync::is_pro() || crate::common::is_custom_client()
                     {
                         Some(hbb_common::password_security::hide_cm().to_string())
                     } else {
@@ -1025,7 +1029,8 @@ async fn handle(data: Data, stream: &mut Connection) {
                         Config::set_id(&value);
                     }
                 } else if name == "temporary-password" {
-                    password::update_temporary_password();
+                    // VideoVault support: keeps a session secret from Connect.
+                    crate::vv_builtin::update_temporary_password();
                 } else if name == "permanent-password" {
                     if Config::is_disable_change_permanent_password() {
                         log::warn!("Changing permanent password is disabled");
